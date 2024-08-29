@@ -1,0 +1,109 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: node-exporter
+rules:
+- apiGroups: [""]
+  resources:
+  - nodes/metrics
+  verbs: ["get"]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: node-exporter
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: node-exporter
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: node-exporter
+subjects:
+- kind: ServiceAccount
+  name: node-exporter
+  namespace: kube-system
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: node-exporter
+  namespace: kube-system
+  labels:
+    k8s-app: node-exporter
+spec:
+  selector:
+    k8s-app: node-exporter
+  ports:
+  - name: metrics
+    port: 9100
+    targetPort: 9100
+    protocol: TCP
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-exporter
+  namespace: kube-system
+  labels:
+    k8s-app: node-exporter
+spec:
+  selector:
+    matchLabels:
+      k8s-app: node-exporter
+  template:
+    metadata:
+      labels:
+        k8s-app: node-exporter
+    spec:
+      containers:
+      - name: node-exporter
+        image: prom/node-exporter:v1.8.2   # 指定使用的node-exporter镜像版本
+        args:
+        - "--path.procfs=/host/proc"
+        - "--path.sysfs=/host/sys"
+        - "--path.rootfs=/rootfs"
+        - "--collector.nfs"
+        - "--collector.nfsd"
+        ports:
+        - name: metrics
+          containerPort: 9100
+          protocol: TCP
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 250m
+            memory: 256Mi
+        volumeMounts:
+        - name: proc
+          mountPath: /host/proc
+          readOnly: true
+        - name: sys
+          mountPath: /host/sys
+          readOnly: true
+        - name: rootfs
+          mountPath: /rootfs
+          readOnly: true
+        securityContext:
+          privileged: true
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      serviceAccountName: node-exporter
+      tolerations:
+      - operator: Exists
+      volumes:
+      - name: proc
+        hostPath:
+          path: /proc
+      - name: sys
+        hostPath:
+          path: /sys
+      - name: rootfs
+        hostPath:
+          path: /

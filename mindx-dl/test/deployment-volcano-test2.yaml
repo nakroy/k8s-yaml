@@ -1,0 +1,48 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: infer-env-quick-validation-2
+spec:
+  replicas: 1 
+  selector:
+    matchLabels:
+      app: infers
+  template:
+    metadata:
+      labels:
+         app: infers
+         ring-controller.atlas: ascend-910b
+    spec:
+      schedulerName: volcano
+      nodeSelector:
+        host-arch: huawei-arm           # Select the os arch. If the os arch is x86, change it to huawei-x86.
+        accelerator-type: module-910b-8
+        kubernetes.io/hostname: s900k3-node1
+      containers:
+      - image: ascend-k8sdeviceplugin:v6.0.RC2                  # Inference image name
+        imagePullPolicy: IfNotPresent
+        env:
+          # ASCEND_VISIBLE_DEVICES env variable is used by ascend-docker-runtime when in the whole card scheduling scene with volcano scheduler. please delete it when in the static vNPU scheduling scene or without volcano.
+          - name: ASCEND_VISIBLE_DEVICES
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.annotations['huawei.com/Ascend910'] # The value must be the same as resources.requests
+        name: infer-env-quick-validation-2
+        command: [ "/bin/bash", "-c", "npu-smi info;sleep 100000;" ]
+        resources:
+          requests:
+            huawei.com/Ascend910: 4             # Number of the Ascend 310 Processors. If the Ascend 310P Processor is used, change it to huawei.com/Ascend310P.
+          limits:
+            huawei.com/Ascend910: 4             # The value should be the same as that of requests . If the Ascend 310P Processor is used, change it to huawei.com/Ascend310P.
+        volumeMounts:
+          - name: ascend-driver
+            mountPath: /usr/local/Ascend/driver
+          - name: npu-smi
+            mountPath: /usr/local/bin/npu-smi
+      volumes:
+        - name: ascend-driver
+          hostPath:
+            path: /usr/local/Ascend/driver
+        - name: npu-smi
+          hostPath:
+            path: /usr/local/bin/npu-smi

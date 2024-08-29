@@ -1,0 +1,235 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: prometheus
+rules:
+- apiGroups: [""]
+  resources:
+  - nodes
+  - nodes/proxy
+  - services
+  - endpoints
+  - pods
+  verbs: ["get", "list", "watch"]
+- apiGroups:
+  - extensions
+  resources:
+  - ingresses
+  verbs: ["get", "list", "watch"]
+- nonResourceURLs: ["/metrics"]
+  verbs: ["get"]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: prometheus
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: prometheus
+subjects:
+- kind: ServiceAccount
+  name: prometheus
+  namespace: kube-system
+---
+kind: Service
+apiVersion: v1
+metadata:
+  labels:
+    app: prometheus
+  name: prometheus
+  namespace: kube-system
+spec:
+  type: NodePort
+  ports:
+  - port: 9090
+    targetPort: 9090
+    nodePort: 30003
+  selector:
+    app: prometheus
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    name: prometheus-deployment
+  name: prometheus
+  namespace: kube-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: prometheus
+  template:
+    metadata:
+      labels:
+        app: prometheus
+    spec:
+      nodeSelector:
+        masterselector: dls-master-node
+      containers:
+      - image: prom/prometheus:v2.53.2
+        name: prometheus
+        command:
+        - "/bin/prometheus"
+        args:
+        - "--config.file=/etc/prometheus/prometheus.yml"
+        - "--storage.tsdb.path=/prometheus"
+        - "--storage.tsdb.retention=24h"
+        ports:
+        - containerPort: 9090
+          protocol: TCP
+        volumeMounts:
+        - mountPath: "/prometheus"
+          name: data
+        - mountPath: "/etc/prometheus"
+          name: config-volume
+        - name: timezone
+          mountPath: /etc/timezone
+        - name: localtime
+          mountPath: /etc/localtime
+        resources:
+          requests:
+            cpu: 100m
+            memory: 100Mi
+          limits:
+            cpu: 500m
+            memory: 2500Mi
+      serviceAccountName: prometheus
+      volumes:
+      - name: data
+        emptyDir: {}
+      - name: config-volume
+        configMap:
+          name: prometheus-config
+      - name: timezone
+        hostPath:
+          path: /etc/timezone
+      - name: localtime
+        hostPath:
+          path: /etc/localtime
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: kube-system
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval:     15s
+      evaluation_interval: 15s
+    scrape_configs:
+
+    - job_name: 'kubernetes-apiservers'
+      kubernetes_sd_configs:
+      - role: endpoints
+      scheme: https
+      tls_config:
+        ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+      bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+      relabel_configs:
+      - source_labels: [__meta_kubernetes_namespace, __meta_kubernetes_service_name, __meta_kubernetes_endpoint_port_name]
+        action: keep
+        regex: default;kubernetes;https
+
+    - job_name: 'kubernetes-nodes'
+      kubernetes_sd_configs:
+      - role: node
+      scheme: https
+      tls_config:
+        ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+      bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+      relabel_configs:
+      - action: labelmap
+        regex: __meta_kubernetes_node_label_(.+)
+      - target_label: __address__
+        replacement: kubernetes.default.svc:443
+      - source_labels: [__meta_kubernetes_node_name]
+        regex: (.+)
+        target_label: __metrics_path__
+        replacement: /api/v1/nodes/${1}/proxy/metrics
+
+    - job_name: 'kubernetes-node-exporter'
+      scrape_interval: 5s
+      kubernetes_sd_configs:
+      - role: node
+      relabel_configs:
+      - action: labelmap
+        regex: __meta_kubernetes_node_label_(.+)
+      - source_labels: [__meta_kubernetes_node_address_InternalIP]
+        target_label: __address__
+        replacement: ${1}:9100
+        
+    - job_name: 'kubernetes-npu-exporter'
+      kubernetes_sd_configs:
+      - role: pod
+      scheme: http
+      relabel_configs:
+      - action: keep
+        source_labels: [__meta_kubernetes_namespace]
+        regex: npu-exporter
+      - source_labels: [__meta_kubernetes_pod_node_name]
+        target_label: job
+        replacement: ${1}
+
+    - job_name: kubernetes-service-endpoints
+      kubernetes_sd_configs:
+      - role: endpoints
+      relabel_configs:
+      - action: keep
+        regex: true
+        source_labels: 
+        - __meta_kubernetes_service_annotation_prometheus_io_scrape
+      - action: replace
+        regex: (https?)
+        source_labels: 
+        - __meta_kubernetes_service_annotation_prometheus_io_scheme
+        target_label: __scheme__
+      - action: replace
+        regex: (.+)
+        source_labels: 
+        - __meta_kubernetes_service_annotation_prometheus_io_path
+        target_label: __metrics_path__
+      - action: replace
+        regex: ([^:]+)(?::\d+)?;(\d+)
+        replacement: $1:$2
+        source_labels: 
+        - __address__
+        - __meta_kubernetes_service_annotation_prometheus_io_port
+        target_label: __address__
+      - action: labelmap
+        regex: __meta_kubernetes_service_label_(.+)
+      - action: replace
+        source_labels: 
+        - __meta_kubernetes_namespace        
+        target_label: kubernetes_namespace
+      - action: replace
+        source_labels: 
+        - __meta_kubernetes_service_name        
+        target_label: kubernetes_name
+
+    - job_name: kubernetes-access-manager
+      scheme: https
+      tls_config:
+        insecure_skip_verify: true
+      metrics_path: /accessmanager/v1/metrics
+      static_configs:
+        - targets:
+            - access-manager.mindx-dl:8090
+
+    - job_name: kubernetes-license-agent
+      scheme: https
+      tls_config:
+        insecure_skip_verify: true
+      metrics_path: /v1/license_agent_metric
+      static_configs:
+        - targets:
+            - access-manager.mindx-dl:8090

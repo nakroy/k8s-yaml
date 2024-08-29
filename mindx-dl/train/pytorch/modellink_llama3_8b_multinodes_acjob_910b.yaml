@@ -1,0 +1,220 @@
+apiVersion: mindxdl.gitee.com/v1
+kind: AscendJob
+metadata:
+  name: modellink-llama3-pytorch
+  labels:
+    framework: pytorch
+    ring-controller.atlas: ascend-910b
+    tor-affinity: "null" #该标签为任务是否使用交换机亲和性调度标签，null或者不写该标签则不适用。large-model-schema表示大模型任务，normal-schema 普通任务
+spec:
+  schedulerName: volcano   # work when enableGangScheduling is true
+  runPolicy:
+    schedulingPolicy:      # work when enableGangScheduling is true
+      minAvailable: 2
+      queue: default
+  successPolicy: AllWorkers
+  replicaSpecs:
+    Master:
+      replicas: 1
+      restartPolicy: Never
+      template:
+        metadata:
+          labels:
+            ring-controller.atlas: ascend-910b
+        spec:
+          affinity:
+            podAntiAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                - labelSelector:
+                    matchExpressions:
+                      - key: job-name
+                        operator: In
+                        values:
+                          - modellink-llama3-pytorch
+                  topologyKey: kubernetes.io/hostname
+          nodeSelector:
+            host-arch: huawei-arm
+            accelerator-type: module-910b-8 # depend on your device model, 910bx8 is module-910b-8 ,910bx16 is module-910b-16
+          containers:
+          - name: ascend # do not modify
+            image: ascend-pytorch:CANN8.0.RC2-pytorch2.1.0-py3.10-ubuntu22.04-910B  # trainning framework image， which can be modified
+            imagePullPolicy: IfNotPresent
+            env:
+              - name: XDL_IP # IP address of the physical node, which is used to identify the node where the pod is running
+                valueFrom:
+                  fieldRef:
+                    fieldPath: status.hostIP
+              # ASCEND_VISIBLE_DEVICES env variable is used by ascend-docker-runtime when in the whole card scheduling scene with volcano scheduler. please delete it when in the static vNPU scheduling scene or without volcano.
+              - name: ASCEND_VISIBLE_DEVICES
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.annotations['huawei.com/Ascend910'] # The value must be the same as resources.requests
+            command:   # training command, which can be modified
+              - /bin/bash
+              - -c
+            args: 
+              - |
+                source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
+                cd /workspace/ModelLink && \
+                bash scripts/package_install.sh && \
+                bash scripts/convert_model.sh && \
+                bash scripts/preprocess_data.sh && \
+                touch /workspace/ModelLink/preprocessing_done.txt && \
+                bash scripts/finetune_llama.sh
+            ports:
+              - containerPort: 2222         # determined by user
+                name: ascendjob-port        # do not modify
+            resources:
+              limits:
+                huawei.com/Ascend910: 8
+              requests:
+                huawei.com/Ascend910: 8
+            volumeMounts:
+            - name: code
+              mountPath: /workspace/ModelLink
+            - name: dataset
+              mountPath: /workspace/dataset
+            - name: model-weights
+              mountPath: /workspace/model_weights/
+            - name: local-model-weights
+              mountPath: /workspace/local_model_weights/
+            - name: ascend-driver
+              mountPath: /usr/local/Ascend/driver
+            - name: ascend-add-ons
+              mountPath: /usr/local/Ascend/add-ons
+            - name: dshm
+              mountPath: /dev/shm
+            - name: localtime
+              mountPath: /etc/localtime
+          volumes:
+          - name: code
+            nfs:
+              server: 192.168.7.89
+              path: "/model/nfs/kubedata/train/ModelLink"
+          - name: dataset
+            nfs:
+              server: 192.168.7.89
+              path: "/model/nfs/kubedata/dataset"
+          - name: model-weights
+            nfs:
+              server: 192.168.7.89
+              path: "/model/nfs/kubedata/model_weights"
+          - name: local-model-weights
+            hostPath:
+              path: /share/model_weights
+          - name: ascend-driver
+            hostPath:
+              path: /usr/local/Ascend/driver
+          - name: ascend-add-ons
+            hostPath:
+              path: /usr/local/Ascend/add-ons
+          - name: dshm
+            emptyDir:
+              medium: Memory
+          - name: localtime
+            hostPath:
+              path: /etc/localtime
+    Worker:
+      replicas: 1
+      restartPolicy: Never
+      template:
+        metadata:
+          labels:
+            ring-controller.atlas: ascend-910b
+        spec:
+          affinity:
+            podAntiAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                - labelSelector:
+                    matchExpressions:
+                      - key: job-name
+                        operator: In
+                        values:
+                          - modellink-llama3-pytorch
+                  topologyKey: kubernetes.io/hostname
+          nodeSelector:
+            host-arch: huawei-arm
+            accelerator-type: module-910b-8 # depend on your device model, 910bx8 is module-910b-8 ,910bx16 is module-910b-16
+          containers:
+          - name: ascend # do not modify
+            image: ascend-pytorch:CANN8.0.RC2-pytorch2.1.0-py3.10-ubuntu22.04-910B # trainning framework image， which can be modified
+            imagePullPolicy: IfNotPresent
+            env:
+              - name: XDL_IP   # IP address of the physical node, which is used to identify the node where the pod is running
+                valueFrom:
+                  fieldRef:
+                    fieldPath: status.hostIP
+              # ASCEND_VISIBLE_DEVICES env variable is used by ascend-docker-runtime when in the whole card scheduling scene with volcano scheduler. please delete it when in the static vNPU scheduling scene or without volcano.
+              - name: ASCEND_VISIBLE_DEVICES
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.annotations['huawei.com/Ascend910']  # The value must be the same as resources.requests
+            command:   # training command, which can be modified
+              - /bin/bash
+              - -c
+            args: 
+              - |
+                source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
+                cd /workspace/ModelLink && \
+                bash scripts/package_install.sh && \
+                bash scripts/convert_model.sh && \
+                echo "Dependencies installed, waiting for Master to complete preprocessing..." && \
+                while [ ! -f /workspace/ModelLink/preprocessing_done.txt ]; do \
+                  echo "Waiting for preprocessing to complete..."; \
+                  sleep 10; \
+                done && \
+                echo "Preprocessing completed, starting training..." && \
+                bash scripts/finetune_llama.sh                
+            ports:                          # default value containerPort: 2222 name: ascendjob-port if not set
+              - containerPort: 2222         # determined by user
+                name: ascendjob-port        # do not modify
+            resources:
+              limits:
+                huawei.com/Ascend910: 8
+              requests:
+                huawei.com/Ascend910: 8
+            volumeMounts:
+            - name: code
+              mountPath: /workspace/ModelLink
+            - name: dataset
+              mountPath: /workspace/dataset
+            - name: model-weights
+              mountPath: /workspace/model_weights/
+            - name: local-model-weights
+              mountPath: /workspace/local_model_weights
+            - name: ascend-driver
+              mountPath: /usr/local/Ascend/driver
+            - name: ascend-add-ons
+              mountPath: /usr/local/Ascend/add-ons
+            - name: dshm
+              mountPath: /dev/shm
+            - name: localtime
+              mountPath: /etc/localtime
+          volumes:
+          - name: code
+            nfs:
+              server: 192.168.7.89
+              path: "/model/nfs/kubedata/train/ModelLink"
+          - name: dataset
+            nfs:
+              server: 192.168.7.89
+              path: "/model/nfs/kubedata/dataset"
+          - name: model-weights
+            nfs:
+              server: 192.168.7.89
+              path: "/model/nfs/kubedata/model_weights"
+          - name: local-model-weights
+            hostPath:
+              path: /share/model_weights
+          - name: ascend-driver
+            hostPath:
+              path: /usr/local/Ascend/driver
+          - name: ascend-add-ons
+            hostPath:
+              path: /usr/local/Ascend/add-ons
+          - name: dshm
+            emptyDir:
+              medium: Memory
+          - name: localtime
+            hostPath:
+              path: /etc/localtime
